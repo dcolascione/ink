@@ -1,4 +1,4 @@
-import React, {useMemo, useState, useLayoutEffect, type ReactNode} from 'react';
+import React, {useMemo, type ReactNode} from 'react';
 import {type Styles} from '../styles.js';
 
 export type Props<T> = {
@@ -32,20 +32,12 @@ export type Props<T> = {
  * a list of completed tests. [Gatsby](https://github.com/gatsbyjs/gatsby) uses it
  * to display a list of generated pages, while still displaying a live progress bar.
  */
+
 export default function Static<T>(props: Props<T>) {
 	const {items, children: render, style: customStyle} = props;
-	const [index, setIndex] = useState(0);
 
-	const itemsToRender: T[] = useMemo(() => {
-		return items.slice(index);
-	}, [items, index]);
-
-	useLayoutEffect(() => {
-		setIndex(items.length);
-	}, [items.length]);
-
-	const children = itemsToRender.map((item, itemIndex) => {
-		return render(item, index + itemIndex);
+	const children = items.map((item, itemIndex) => {
+		return render(item, itemIndex);
 	});
 
 	const style: Styles = useMemo(

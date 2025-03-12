@@ -1,7 +1,6 @@
 import process from 'node:process';
 import React, {type ReactNode} from 'react';
 import {throttle} from 'es-toolkit/compat';
-import ansiEscapes from 'ansi-escapes';
 import autoBind from 'auto-bind';
 import signalExit from 'signal-exit';
 import patchConsole from 'patch-console';
@@ -13,6 +12,7 @@ import logUpdate, {type LogUpdate} from './log-update.js';
 import instances from './instances.js';
 import App from './components/App.js';
 import Yoga from 'yoga-wasm-web/auto';
+import { DEFAULT_TERMINAL_WIDTH } from './constants.js';
 
 const isInCi = Boolean(process.env["CI"]);
 const isTTY = process.stdout.isTTY;
@@ -64,12 +64,6 @@ export type Options = {
 	osc133?: boolean;
 };
 
-const stripPrefixIfPresent = (prefix: string, s: string): string => {
-	return s.startsWith(prefix)
-	? s.substring(prefix.length)
-	: s;
-};
-
 function stripOsc133(s: string): string {
 	return s.replace(anyOsc133Regex, '');
 }
@@ -81,12 +75,8 @@ export default class Ink {
 	// Ignore last render after unmounting a tree to prevent empty output before exit
 	private isUnmounted: boolean;
 	private lastOutput: string;
-	private lastOutputHeight: number;
 	private readonly container: FiberRoot;
 	private rootNode: dom.DOMElement | null = null;
-	// This variable is used only in debug mode to store full static output
-	// so that it's rerendered every time, not just new static parts, like in non-debug mode
-	private fullStaticOutput: string;
 	private exitPromise?: Promise<void>;
 	private restoreConsole?: () => void;
 	private readonly unsubscribeResize?: () => void;
@@ -108,16 +98,11 @@ export default class Ink {
 		// Store last output to only rerender when needed
 		this.lastOutput = '';
 
-		// Store last output height so we know to clear the terminal when the previous output
-		// height is greater than the current terminal height
-		this.lastOutputHeight = 0;
-
 		// This variable is used only in debug mode to store full static output
 		// so that it's rerendered every time, not just new static parts, like in non-debug mode
-		this.fullStaticOutput = '';
 
 		// Emit initial OSC 133 prompt start escape
-		if (!isInCi && options.osc133) {
+		if (!isInCi && isTTY && options.osc133) {
 			options.stdout.write(oscPromptStartRefreshLine);
 		}
 
@@ -172,7 +157,7 @@ export default class Ink {
 
 	resized = () => {
 		this.calculateLayout();
-		this.onRender(true);
+		this.onRender();
 	};
 
 	resolveExitPromise: () => void = () => {};
@@ -181,8 +166,7 @@ export default class Ink {
 
 	calculateLayout = () => {
 		// The 'columns' property can be undefined or 0 when not using a TTY.
-		// In that case we fall back to 80.
-		const terminalWidth = this.options.stdout.columns || 80;
+		const terminalWidth = this.options.stdout.columns || DEFAULT_TERMINAL_WIDTH;
 
 		if (!this.rootNode) {
 			// Yoga is not initialized yet
@@ -198,14 +182,14 @@ export default class Ink {
 		);
 	};
 
-	onRender(didResize = false) {
+	onRender() {
 		// Ask terminal emulators not to redraw the framebuffer
 		// while we're in the middle of a atomic update.  Avoids flicker.
 		try {
 			if (!isInCi && isTTY) {
 				this.options.stdout.write(atomicUpdateStart);
 			}
-			this.onRenderInternal(didResize);
+			this.onRenderInternal();
 		} finally {
 			if (!isInCi && isTTY) {
 				this.options.stdout.write(atomicUpdateEnd);
@@ -213,7 +197,7 @@ export default class Ink {
 		}
 	};
 
-	onRenderInternal(didResize: boolean) {
+	onRenderInternal() {
 		if (this.isUnmounted) {
 			return;
 		}
@@ -260,7 +244,7 @@ export default class Ink {
 		// For render() output purposes, we assume we're in command mode,
 		// so whenever we enter prompt mode we leave command mode, and whenever
 		// we leave prompt mode, we re-enter command mode.
-		const {output, outputHeight, staticOutput} = render(
+		const {output, staticOutput} = render(
 			this.rootNode,
 			endOscCommand + startOscPrompt,
 			endOscPrompt + startOscCommand);
@@ -275,65 +259,6 @@ export default class Ink {
 				      staticOutput /* assume ends with \n */ +
 				      startOscPrompt)
 				   : staticOutput;
-
-		if (this.options.debug) {
-			if (hasStaticOutput) {
-				this.fullStaticOutput += wrappedStaticOutput;
-			}
-
-			this.options.stdout.write(this.fullStaticOutput + output);
-			return;
-		}
-
-		if (isInCi) {
-			if (hasStaticOutput) {
-				this.options.stdout.write(wrappedStaticOutput);
-			}
-
-			this.lastOutput = output;
-			this.lastOutputHeight = outputHeight;
-			return;
-		}
-
-		if (hasStaticOutput) {
-			this.fullStaticOutput += wrappedStaticOutput;
-		}
-
-		const writeFullStaticOutput = () => {
-			// fullStaticOutput has embedded prompt-end prompt-start OSC133
-			// sequences; it expects to be printed in the in-prompt state.
-			// Strip any leading prompt-stop off the string when we print
-			// it so that it's appropriate to print in our non-prompt-start
-			// context.  We add an extra newline to match what logOutput does.
-			this.options.stdout.write(
-				endOscPrompt +
-				ansiEscapes.clearTerminal +
-				stripPrefixIfPresent(endOscPrompt, this.fullStaticOutput) +
-				output + '\n');
-		};
-
-		if (
-			outputHeight >= this.options.stdout.rows ||
-			this.lastOutputHeight >= this.options.stdout.rows
-		) {
-			if (this.options.onFlicker) {
-				this.options.onFlicker();
-			}
-			writeFullStaticOutput();
-			this.lastOutput = output;
-			this.lastOutputHeight = outputHeight;
-			// Account for the extra newline
-			this.log.updateLineCount(output + '\n');
-			return;
-		}
-
-		if (didResize) {
-			writeFullStaticOutput();
-			this.lastOutput = output;
-			this.lastOutputHeight = outputHeight;
-			this.log.updateLineCount(output + '\n');
-			return;
-		}
 
 		// To ensure static output is cleanly rendered before main output, clear main output first
 		if (hasStaticOutput) {
@@ -350,7 +275,6 @@ export default class Ink {
 		}
 
 		this.lastOutput = output;
-		this.lastOutputHeight = outputHeight;
 	}
 
 	render(node: ReactNode): void {
@@ -377,7 +301,6 @@ export default class Ink {
 		}
 
 		if (this.options.debug) {
-			this.options.stdout.write(data + this.fullStaticOutput + this.lastOutput);
 			return;
 		}
 
@@ -398,7 +321,6 @@ export default class Ink {
 
 		if (this.options.debug) {
 			this.options.stderr.write(data);
-			this.options.stdout.write(this.fullStaticOutput + this.lastOutput);
 			return;
 		}
 

@@ -291,18 +291,16 @@ export default class Output {
 			}
 
 			// Add the line
-			result += lineText;
-
-			// Add newline if not the last line
-			if (i < output.length - 1) {
-				result += '\n';
-			}
+			result += lineText + '\n';
 		}
 
 		// Ensure prompt is closed at the end if needed
 		if (currentIsPrompt) {
 			result += this.endOscPrompt;
 		}
+
+		// Always add a trailing newline for consistency between renders
+		result += '\n';
 
 		return {
 			output: result,
